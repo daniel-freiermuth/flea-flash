@@ -1,0 +1,5 @@
+Name: libudev
+Description: libudev stub — links against the installed libudev.so.1 without requiring libudev-dev.
+Version: 255
+Libs: -L${pcfiledir} -ludev
+Cflags:
