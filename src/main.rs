@@ -1,5 +1,6 @@
 use clap::Parser;
-use fleascope_rs::{FleaConnector, FleaConnectorError, FlashProgress, FlashUpgradeError};
+use fleascope_rs::{FleaConnector, FleaConnectorError, FleaDevice, FlashProgress, FlashUpgradeError};
+use std::io::Write as _;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -23,10 +24,14 @@ struct Cli {
     #[arg(short, long)]
     port: Option<String>,
 
-    /// Device name to match during auto-detection (e.g. `FleaScope`).
-    /// Ignored when `--port` is given.
+    /// Device name to match (e.g. `FleaScope`).
+    /// Combined with `--port` when both are given.
     #[arg(short, long)]
     name: Option<String>,
+
+    /// Skip the interactive confirmation prompt (for scripted use).
+    #[arg(short, long)]
+    yes: bool,
 
     /// Enable verbose (debug) logging.
     #[arg(short, long)]
@@ -212,6 +217,18 @@ enum AppError {
 
     #[error("Flash upgrade error: {0}")]
     Flash(#[from] FlashUpgradeError),
+
+    #[error(
+        "Multiple matching devices found — use --port to select one:\n{}",
+        .0.iter().map(|d| format!("  {} on {}", d.name, d.port)).collect::<Vec<_>>().join("\n")
+    )]
+    AmbiguousDevice(Vec<FleaDevice>),
+
+    #[error("I/O error reading confirmation: {0}")]
+    ConfirmIo(#[from] std::io::Error),
+
+    #[error("Aborted by user.")]
+    Aborted,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -234,24 +251,62 @@ fn run(cli: &Cli) -> Result<(), AppError> {
     // ── 1. Validate HEX file ─────────────────────────────────────────────────
     eprintln!("Validating '{}'...", cli.hex_file.display());
     let hex = HexFile::load(&cli.hex_file)?;
-    eprintln!(
-        "  OK — {} records",
-        hex.lines.len()
-    );
+    eprintln!("  OK — {} records", hex.lines.len());
 
-    // ── 2. Connect to device ─────────────────────────────────────────────────
-    eprintln!("Connecting to device...");
-    let mut terminal = FleaConnector::connect(cli.name.as_deref(), cli.port.as_deref(), false)?;
+    // ── 2. Enumerate and select device ───────────────────────────────────────
+    // Collect every device that matches the optional --name filter.
+    let mut devices: Vec<FleaDevice> =
+        FleaConnector::get_available_devices(cli.name.as_deref())?.collect();
+
+    // Narrow to the requested port when --port is given.
+    if let Some(port) = &cli.port {
+        devices.retain(|d| &d.port == port);
+        if devices.is_empty() {
+            return Err(FleaConnectorError::InvalidPort { port: port.clone() }.into());
+        }
+    }
+
+    match devices.len() {
+        0 => {
+            return Err(FleaConnectorError::DeviceNotFound {
+                name: cli.name.clone().unwrap_or_else(|| "FleaScope".to_string()),
+            }
+            .into());
+        }
+        1 => {} // exactly one — proceed
+        _ => return Err(AppError::AmbiguousDevice(devices)),
+    }
+
+    let device = &devices[0];
+
+    // ── 3. Confirm with the user ─────────────────────────────────────────────
+    eprintln!("Target device: {} on {}", device.name, device.port);
+
+    if !cli.yes {
+        eprint!("Flash this device? [y/N] ");
+        std::io::stderr().flush()?;
+
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        match answer.trim().to_lowercase().as_str() {
+            "y" | "yes" => {}
+            _ => return Err(AppError::Aborted),
+        }
+    }
+
+    // ── 4. Connect ───────────────────────────────────────────────────────────
+    eprintln!("Connecting...");
+    let mut terminal =
+        FleaConnector::connect(cli.name.as_deref(), Some(&device.port), false)?;
     eprintln!("  Connected.");
 
-    // ── 3. Flash ─────────────────────────────────────────────────────────────
+    // ── 5. Flash ─────────────────────────────────────────────────────────────
     let record_refs: Vec<&str> = hex.lines.iter().map(String::as_str).collect();
     let total = record_refs.len();
 
     eprintln!("Flashing {total} records...");
 
     terminal.flash_upgrade(&record_refs, |progress: FlashProgress| {
-        // Print a progress dot every 64 records so the output isn't flooded.
         if progress.sent.is_multiple_of(64) || progress.sent == progress.total {
             let pct = progress.sent * 100 / progress.total;
             eprint!("\r  {}/{} ({pct}%)   ", progress.sent, progress.total);
