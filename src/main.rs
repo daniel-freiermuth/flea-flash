@@ -75,6 +75,15 @@ enum HexError {
     #[error("Line {line}: data record byte count {count} is not a multiple of 4 (firmware requirement)")]
     UnalignedDataCount { line: usize, count: usize },
 
+    #[error(
+        "Line {line}: record type 0x{record_type:02x} with {count} data bytes is not accepted by the firmware (only 00, 01 with 0 bytes, 04 with 2 bytes)"
+    )]
+    UnsupportedRecord {
+        line: usize,
+        record_type: u8,
+        count: usize,
+    },
+
     #[error("No extended linear address record (type 4) found; firmware requires at least one")]
     MissingExtendedAddress,
 
@@ -168,6 +177,19 @@ impl HexFile {
                 declared: declared_count,
                 actual: data.len(),
             });
+        }
+
+        // Firmware (flash.c) accepts only data (00), EOF (01, 0 bytes) and
+        // extended linear address (04, 2 bytes); anything else is "bad record".
+        match (record_type, declared_count) {
+            (0x00, _) | (0x01, 0) | (0x04, 2) => {}
+            _ => {
+                return Err(HexError::UnsupportedRecord {
+                    line: line_num,
+                    record_type,
+                    count: declared_count,
+                });
+            }
         }
 
         // Firmware flashes 4 bytes at a time; data records must be 4-byte aligned.
@@ -429,6 +451,26 @@ mod tests {
             port: port.to_string(),
             serial: serial.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn parse_rejects_records_firmware_cannot_accept() {
+        // Type-05 start linear address (emitted by GNU objcopy): firmware says "bad record".
+        assert!(matches!(
+            HexFile::parse(":020000040000FA\n:04000005BFC0000078\n:00000001FF\n"),
+            Err(HexError::UnsupportedRecord { line: 2, record_type: 0x05, count: 4 })
+        ));
+        // Type-04 must carry exactly 2 bytes.
+        assert!(matches!(
+            HexFile::parse(":0400000400000000F8\n:00000001FF\n"),
+            Err(HexError::UnsupportedRecord { line: 1, record_type: 0x04, count: 4 })
+        ));
+        // Type-01 must carry no data.
+        assert!(matches!(
+            HexFile::parse(":020000040000FA\n:0100000100FE\n"),
+            Err(HexError::UnsupportedRecord { line: 2, record_type: 0x01, count: 1 })
+        ));
+        assert!(HexFile::parse(":020000040000FA\n:0400000001020304F2\n:00000001FF\n").is_ok());
     }
 
     #[test]
