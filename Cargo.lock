@@ -695,6 +695,7 @@ dependencies = [
  "env_logger",
  "fleascope-rs",
  "log",
+ "serialport",
  "thiserror",
 ]
 

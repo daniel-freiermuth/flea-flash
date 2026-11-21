@@ -1,7 +1,12 @@
 use clap::Parser;
-use fleascope_rs::{FleaConnector, FleaConnectorError, FleaDevice, FlashProgress, FlashUpgradeError};
+use fleascope_rs::{
+    FleaConnector, FleaConnectorError, FleaDevice, FleaTerminalError, FlashProgress,
+    FlashUpgradeError, IdleFleaTerminal, StatelessFleaTerminal,
+};
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 use thiserror::Error;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -231,6 +236,92 @@ enum AppError {
     Aborted,
 }
 
+/// A `FleaScope` port as enumerated, with the device's USB serial number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PortCandidate {
+    port: String,
+    serial: Option<String>,
+}
+
+/// Enumerate `FleaScope` ports (any product name) with their USB serial numbers.
+fn enumerate_fleascopes() -> Result<Vec<PortCandidate>, AppError> {
+    let flea_ports: Vec<String> = FleaConnector::get_available_devices(None)?
+        .map(|d| d.port)
+        .collect();
+    let ports = serialport::available_ports().map_err(FleaConnectorError::from)?;
+    Ok(ports
+        .into_iter()
+        .filter(|p| flea_ports.contains(&p.port_name))
+        .map(|p| PortCandidate {
+            serial: match p.port_type {
+                serialport::SerialPortType::UsbPort(usb) => usb.serial_number,
+                _ => None,
+            },
+            port: p.port_name,
+        })
+        .collect())
+}
+
+/// Open the `confirmed` port and bring it to an idle terminal.
+///
+/// Mirrors `FleaConnector`'s name-based connect: on a handshake timeout it
+/// sends `reset`, closes the port, waits, and enumerates again (`enumerate`),
+/// because the rebooted device can come back under a different port. The
+/// device is found again by USB serial number, never by product name, so the
+/// device that gets flashed is the one the user confirmed.
+fn connect_port(
+    name: &str,
+    confirmed: &PortCandidate,
+    mut enumerate: impl FnMut() -> Result<Vec<PortCandidate>, AppError>,
+) -> Result<IdleFleaTerminal, AppError> {
+    let mut port = confirmed.port.clone();
+    loop {
+        match StatelessFleaTerminal::new(&port)
+            .map_err(FleaConnectorError::from)?
+            .try_into()
+        {
+            Ok(terminal) => return Ok(terminal),
+            Err((mut serial, FleaTerminalError::Timeout { .. })) => {
+                log::debug!("Timeout during initialization, sending reset and retrying");
+                let _ = serial.send_reset(); // best effort, as in fleascope-rs
+                // Release the port so the re-enumerated device is not kept
+                // off its old device node.
+                drop(serial);
+                thread::sleep(Duration::from_secs(2));
+                port = reselect_port(confirmed, &enumerate()?).ok_or_else(|| {
+                    FleaConnectorError::DeviceNotFound {
+                        name: name.to_string(),
+                    }
+                })?;
+            }
+            Err((_serial, e)) => return Err(FleaConnectorError::from(e).into()),
+        }
+    }
+}
+
+/// Find the `confirmed` device among `found` after a reset.
+///
+/// Identity is the USB serial number; among several ports of that device
+/// (macOS lists `/dev/cu.*` and `/dev/tty.*`) the confirmed port is preferred.
+/// Without a serial number only the confirmed port itself is accepted.
+/// `None` means the confirmed device is not present.
+fn reselect_port(confirmed: &PortCandidate, found: &[PortCandidate]) -> Option<String> {
+    let same_device: Vec<&PortCandidate> = found
+        .iter()
+        .filter(|c| {
+            confirmed.serial.as_ref().map_or_else(
+                || c.port == confirmed.port,
+                |serial| c.serial.as_ref() == Some(serial),
+            )
+        })
+        .collect();
+    same_device
+        .iter()
+        .find(|c| c.port == confirmed.port)
+        .or_else(|| same_device.first())
+        .map(|c| c.port.clone())
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ──────────────────────────────────────────────────────────────────────────────
@@ -278,6 +369,15 @@ fn run(cli: &Cli) -> Result<(), AppError> {
     }
 
     let device = &devices[0];
+    // Record the device's USB serial number now, so a retry after reset can
+    // find this device again even if it re-enumerates under another port.
+    let confirmed = enumerate_fleascopes()?
+        .into_iter()
+        .find(|c| c.port == device.port)
+        .unwrap_or_else(|| PortCandidate {
+            port: device.port.clone(),
+            serial: None,
+        });
 
     // ── 3. Confirm with the user ─────────────────────────────────────────────
     eprintln!("Target device: {} on {}", device.name, device.port);
@@ -296,8 +396,9 @@ fn run(cli: &Cli) -> Result<(), AppError> {
 
     // ── 4. Connect ───────────────────────────────────────────────────────────
     eprintln!("Connecting...");
-    let mut terminal =
-        FleaConnector::connect(cli.name.as_deref(), Some(&device.port), false)?;
+    // Connect to the confirmed device, with the library's reset-and-retry on
+    // handshake timeout (FleaConnector::connect with Some(port) panics on it).
+    let mut terminal = connect_port(&device.name, &confirmed, enumerate_fleascopes)?;
     eprintln!("  Connected.");
 
     // ── 5. Flash ─────────────────────────────────────────────────────────────
@@ -317,4 +418,114 @@ fn run(cli: &Cli) -> Result<(), AppError> {
     eprintln!("Flash complete. Device is resetting — reconnect after a moment.");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cand(port: &str, serial: Option<&str>) -> PortCandidate {
+        PortCandidate {
+            port: port.to_string(),
+            serial: serial.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn reselect_port_follows_serial_to_new_port() {
+        let confirmed = cand("/dev/ttyACM0", Some("A"));
+        let found = [cand("/dev/ttyACM1", Some("B")), cand("/dev/ttyACM2", Some("A"))];
+        assert_eq!(reselect_port(&confirmed, &found).as_deref(), Some("/dev/ttyACM2"));
+    }
+
+    #[test]
+    fn reselect_port_never_picks_another_device() {
+        // The confirmed device is not back yet; another FleaScope (same
+        // product name, different serial) must not be selected.
+        let confirmed = cand("/dev/ttyACM0", Some("A"));
+        let found = [cand("/dev/ttyACM1", Some("B"))];
+        assert_eq!(reselect_port(&confirmed, &found), None);
+    }
+
+    #[test]
+    fn reselect_port_prefers_confirmed_port_among_aliases() {
+        // macOS lists one device twice (cu.* and tty.*) with the same serial.
+        let confirmed = cand("/dev/tty.usbmodem1", Some("A"));
+        let found = [
+            cand("/dev/cu.usbmodem1", Some("A")),
+            cand("/dev/tty.usbmodem1", Some("A")),
+        ];
+        assert_eq!(reselect_port(&confirmed, &found).as_deref(), Some("/dev/tty.usbmodem1"));
+    }
+
+    #[test]
+    fn reselect_port_without_serial_accepts_only_confirmed_port() {
+        let confirmed = cand("/dev/ttyACM0", None);
+        assert_eq!(reselect_port(&confirmed, &[cand("/dev/ttyACM1", None)]), None);
+        assert_eq!(
+            reselect_port(&confirmed, &[cand("/dev/ttyACM0", None)]).as_deref(),
+            Some("/dev/ttyACM0")
+        );
+    }
+
+    /// Fake device on a pty master: records what it receives and, if
+    /// `answers`, replies with the prompt to `prompt on`.
+    #[cfg(unix)]
+    fn fake_device(
+        mut master: serialport::TTYPort,
+        answers: bool,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> thread::JoinHandle<String> {
+        use std::io::Read as _;
+        thread::spawn(move || {
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 64];
+            let mut answered = false;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                match master.read(&mut buf) {
+                    Ok(n) if n > 0 => seen.extend_from_slice(&buf[..n]),
+                    _ => thread::sleep(Duration::from_millis(10)),
+                }
+                if answers && !answered && seen.ends_with(b"prompt on\n") {
+                    master.write_all(b"> ").unwrap();
+                    answered = true;
+                }
+            }
+            String::from_utf8_lossy(&seen).into_owned()
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connect_port_resets_and_follows_confirmed_device_to_new_port() {
+        use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
+
+        let pty = || {
+            let (master, slave) = serialport::TTYPort::pair().unwrap();
+            let path = serialport::SerialPort::name(&slave).unwrap();
+            (master, slave, path)
+        };
+        // Old port of the confirmed device: never answers the handshake.
+        let (old_master, _old_slave, old_path) = pty();
+        // The confirmed device after its reset, under a new port.
+        let (new_master, _new_slave, new_path) = pty();
+        // Another FleaScope with a different serial number.
+        let (other_master, _other_slave, other_path) = pty();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let old = fake_device(old_master, false, Arc::clone(&stop));
+        let new = fake_device(new_master, true, Arc::clone(&stop));
+        let other = fake_device(other_master, true, Arc::clone(&stop));
+
+        let confirmed = cand(&old_path, Some("A"));
+        let found = vec![cand(&other_path, Some("B")), cand(&new_path, Some("A"))];
+        let result = connect_port("Flea-Scope", &confirmed, || Ok(found.clone()));
+
+        stop.store(true, Ordering::SeqCst);
+        let (old, new, other) = (old.join().unwrap(), new.join().unwrap(), other.join().unwrap());
+        assert!(result.is_ok(), "connect failed: {:?}", result.err());
+        assert!(old.contains("prompt on\n") && old.contains("reset\n"), "old port saw {old:?}");
+        assert!(new.ends_with("prompt on\n"), "new port saw {new:?}");
+        assert!(other.is_empty(), "other device was contacted: {other:?}");
+    }
 }
