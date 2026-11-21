@@ -100,6 +100,9 @@ enum HexError {
 
     #[error("No EOF record (type 1) found")]
     MissingEof,
+
+    #[error("Line {line}: record after EOF record (type 1); the device stops reading at the first EOF")]
+    DataAfterEof { line: usize },
 }
 
 /// Longest line the firmware's terminal accepts: `command[BASIC_INPUT_LINE_SIZE]`
@@ -129,6 +132,10 @@ impl HexFile {
             let trimmed = raw_line.trim();
             if trimmed.is_empty() {
                 continue;
+            }
+
+            if has_eof {
+                return Err(HexError::DataAfterEof { line: line_num });
             }
 
             let record_type = Self::validate_record(trimmed, line_num)?;
@@ -710,5 +717,16 @@ mod tests {
         let other = other.join().unwrap();
         assert!(result.is_err(), "connected to a device the user did not confirm");
         assert!(other.is_empty(), "other device was contacted: {other:?}");
+    }
+
+    #[test]
+    fn rejects_records_after_eof() {
+        let concatenated = ":020000040000FA\n:04000000DEADBEEFC4\n:00000001FF\n:020000041D00DD\n:04000000CAFEBABEBC\n:00000001FF\n";
+        assert!(matches!(
+            HexFile::parse(concatenated),
+            Err(HexError::DataAfterEof { line: 4 })
+        ));
+        let ok = ":020000040000FA\n:04000000DEADBEEFC4\n:00000001FF\n\n";
+        assert_eq!(HexFile::parse(ok).unwrap().lines.len(), 3);
     }
 }
