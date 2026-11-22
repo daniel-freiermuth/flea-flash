@@ -87,12 +87,21 @@ enum HexError {
         count: usize,
     },
 
+    #[error(
+        "Line {line}: record is {len} characters; the firmware's terminal keeps only {MAX_RECORD_LINE_LEN} per line (at most 28 data bytes per record)"
+    )]
+    LineTooLong { line: usize, len: usize },
+
     #[error("No extended linear address record (type 4) found; firmware requires at least one")]
     MissingExtendedAddress,
 
     #[error("No EOF record (type 1) found")]
     MissingEof,
 }
+
+/// Longest line the firmware's terminal accepts: `command[BASIC_INPUT_LINE_SIZE]`
+/// (72) minus the NUL; extra characters are silently dropped (terminal.c).
+const MAX_RECORD_LINE_LEN: usize = 71;
 
 /// A parsed and validated Intel HEX file, ready to be streamed to the device.
 struct HexFile {
@@ -142,6 +151,13 @@ impl HexFile {
     fn validate_record(line: &str, line_num: usize) -> Result<u8, HexError> {
         if !line.starts_with(':') {
             return Err(HexError::MissingStartCode { line: line_num });
+        }
+
+        if line.len() > MAX_RECORD_LINE_LEN {
+            return Err(HexError::LineTooLong {
+                line: line_num,
+                len: line.len(),
+            });
         }
 
         let hex_digits = &line[1..];
@@ -495,6 +511,22 @@ mod tests {
             Err(HexError::UnalignedDataAddress { line: 2, address: 0x0002 })
         ));
         assert!(HexFile::parse(":020000040000FA\n:0400040001020304EE\n:00000001FF\n").is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_records_longer_than_device_line_buffer() {
+        // 28 data bytes = 67 characters: fits the firmware's 71-character command line.
+        assert!(HexFile::parse(
+            ":020000040000FA\n:1C00000000000000000000000000000000000000000000000000000000000000E4\n:00000001FF\n"
+        )
+        .is_ok());
+        // 32 data bytes = 75 characters: the device would truncate it after erasing flash.
+        assert!(matches!(
+            HexFile::parse(
+                ":020000040000FA\n:200000000000000000000000000000000000000000000000000000000000000000000000E0\n:00000001FF\n"
+            ),
+            Err(HexError::LineTooLong { line: 2, len: 75 })
+        ));
     }
 
     #[test]
