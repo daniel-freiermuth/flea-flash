@@ -374,6 +374,44 @@ fn reselect_port(confirmed: &PortCandidate, found: &[PortCandidate]) -> Option<S
         .map(|c| c.port.clone())
 }
 
+/// Pick the single device to flash from `devices`, narrowed to `port` if given.
+///
+/// macOS lists each device twice, as `/dev/cu.*` and `/dev/tty.*`; the
+/// `tty.*` alias of a listed `cu.*` port is dropped so one device stays one.
+fn select_device(
+    mut devices: Vec<FleaDevice>,
+    port: Option<&str>,
+    name: Option<&str>,
+) -> Result<FleaDevice, AppError> {
+    // Narrow to the requested port when --port is given.
+    if let Some(port) = port {
+        devices.retain(|d| d.port == port);
+        if devices.is_empty() {
+            return Err(FleaConnectorError::InvalidPort {
+                port: port.to_string(),
+            }
+            .into());
+        }
+    }
+
+    // Drop `tty.*` dial-in aliases whose `cu.*` callout twin is listed.
+    let ports: Vec<String> = devices.iter().map(|d| d.port.clone()).collect();
+    devices.retain(|d| {
+        d.port
+            .strip_prefix("/dev/tty.")
+            .is_none_or(|rest| !ports.contains(&format!("/dev/cu.{rest}")))
+    });
+
+    match devices.len() {
+        0 => Err(FleaConnectorError::DeviceNotFound {
+            name: name.unwrap_or("FleaScope").to_string(),
+        }
+        .into()),
+        1 => Ok(devices.remove(0)),
+        _ => Err(AppError::AmbiguousDevice(devices)),
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ──────────────────────────────────────────────────────────────────────────────
@@ -398,29 +436,9 @@ fn run(cli: &Cli) -> Result<(), AppError> {
 
     // ── 2. Enumerate and select device ───────────────────────────────────────
     // Collect every device that matches the optional --name filter.
-    let mut devices: Vec<FleaDevice> =
+    let devices: Vec<FleaDevice> =
         FleaConnector::get_available_devices(cli.name.as_deref())?.collect();
-
-    // Narrow to the requested port when --port is given.
-    if let Some(port) = &cli.port {
-        devices.retain(|d| &d.port == port);
-        if devices.is_empty() {
-            return Err(FleaConnectorError::InvalidPort { port: port.clone() }.into());
-        }
-    }
-
-    match devices.len() {
-        0 => {
-            return Err(FleaConnectorError::DeviceNotFound {
-                name: cli.name.clone().unwrap_or_else(|| "FleaScope".to_string()),
-            }
-            .into());
-        }
-        1 => {} // exactly one — proceed
-        _ => return Err(AppError::AmbiguousDevice(devices)),
-    }
-
-    let device = &devices[0];
+    let device = &select_device(devices, cli.port.as_deref(), cli.name.as_deref())?;
     // Record the device's USB serial number now, so connecting can check it is
     // still this device and find it again if it re-enumerates under another port.
     let confirmed = enumerate_fleascopes()?
@@ -564,6 +582,27 @@ mod tests {
             reselect_port(&confirmed, &[cand("/dev/ttyACM0", None)]).as_deref(),
             Some("/dev/ttyACM0")
         );
+    }
+
+    fn dev(port: &str) -> FleaDevice {
+        FleaDevice {
+            name: "FleaScope".to_string(),
+            port: port.to_string(),
+        }
+    }
+
+    #[test]
+    fn select_device_treats_macos_cu_and_tty_as_one_device() {
+        // macOS lists one device twice: callout (cu.*) and dial-in (tty.*).
+        let aliases = || vec![dev("/dev/cu.usbmodem1"), dev("/dev/tty.usbmodem1")];
+        let picked = select_device(aliases(), None, None).map(|d| d.port);
+        assert_eq!(picked.ok().as_deref(), Some("/dev/cu.usbmodem1"));
+        // An explicit --port still selects either alias.
+        let picked = select_device(aliases(), Some("/dev/tty.usbmodem1"), None).map(|d| d.port);
+        assert_eq!(picked.ok().as_deref(), Some("/dev/tty.usbmodem1"));
+        // Two distinct devices stay ambiguous.
+        let two = vec![dev("/dev/cu.usbmodem1"), dev("/dev/cu.usbmodem2")];
+        assert!(matches!(select_device(two, None, None), Err(AppError::AmbiguousDevice(_))));
     }
 
     /// Fake device on a pty master: records what it receives and, if
