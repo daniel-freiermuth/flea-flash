@@ -95,6 +95,9 @@ enum HexError {
     #[error("No extended linear address record (type 4) found; firmware requires at least one")]
     MissingExtendedAddress,
 
+    #[error("Line {line}: data record before the first extended linear address record (type 4); firmware would write it to an undefined address")]
+    DataBeforeExtendedAddress { line: usize },
+
     #[error("No EOF record (type 1) found")]
     MissingEof,
 }
@@ -130,6 +133,11 @@ impl HexFile {
 
             let record_type = Self::validate_record(trimmed, line_num)?;
             match record_type {
+                0x00 if !has_extended_address => {
+                    // Firmware (flash.c) leaves `extend` uninitialized until the
+                    // first 04 record, so earlier data would go to a garbage address.
+                    return Err(HexError::DataBeforeExtendedAddress { line: line_num });
+                }
                 0x01 => has_eof = true,
                 0x04 => has_extended_address = true,
                 _ => {}
@@ -544,6 +552,16 @@ mod tests {
                 ":020000040000FA\n:200000000000000000000000000000000000000000000000000000000000000000000000E0\n:00000001FF\n"
             ),
             Err(HexError::LineTooLong { line: 2, len: 75 })
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_data_before_first_extended_address() {
+        // Firmware's `extend` is uninitialized until the first 04 record, so
+        // data placed before it lands at a garbage address.
+        assert!(matches!(
+            HexFile::parse(":0400000001020304F2\n:020000040000FA\n:00000001FF\n"),
+            Err(HexError::DataBeforeExtendedAddress { line: 1 })
         ));
     }
 
