@@ -75,6 +75,9 @@ enum HexError {
     #[error("Line {line}: data record byte count {count} is not a multiple of 4 (firmware requirement)")]
     UnalignedDataCount { line: usize, count: usize },
 
+    #[error("Line {line}: data record address 0x{address:04x} is not 4-byte aligned (firmware requirement)")]
+    UnalignedDataAddress { line: usize, address: u16 },
+
     #[error(
         "Line {line}: record type 0x{record_type:02x} with {count} data bytes is not accepted by the firmware (only 00, 01 with 0 bytes, 04 with 2 bytes)"
     )]
@@ -197,6 +200,15 @@ impl HexFile {
             return Err(HexError::UnalignedDataCount {
                 line: line_num,
                 count: declared_count,
+            });
+        }
+        // It does 32-bit loads/writes at extend<<16 | address; the type-04
+        // record only supplies the upper half, so the address must be aligned.
+        let address = u16::from_be_bytes([bytes[1], bytes[2]]);
+        if record_type == 0x00 && !address.is_multiple_of(4) {
+            return Err(HexError::UnalignedDataAddress {
+                line: line_num,
+                address,
             });
         }
 
@@ -473,6 +485,16 @@ mod tests {
             Err(HexError::UnsupportedRecord { line: 2, record_type: 0x01, count: 1 })
         ));
         assert!(HexFile::parse(":020000040000FA\n:0400000001020304F2\n:00000001FF\n").is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_unaligned_data_address() {
+        // Firmware does 32-bit loads/writes at extend<<16 | addr; addr 0x0002 is unaligned.
+        assert!(matches!(
+            HexFile::parse(":020000040000FA\n:0400020001020304F0\n:00000001FF\n"),
+            Err(HexError::UnalignedDataAddress { line: 2, address: 0x0002 })
+        ));
+        assert!(HexFile::parse(":020000040000FA\n:0400040001020304EE\n:00000001FF\n").is_ok());
     }
 
     #[test]
