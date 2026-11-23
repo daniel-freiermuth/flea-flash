@@ -201,23 +201,13 @@ impl HexFile {
             .map_err(|()| HexError::InvalidHex { line: line_num })?;
 
         // Minimum: 1 (count) + 2 (addr) + 1 (type) + 1 (checksum) = 5 bytes
-        if bytes.len() < 5 {
+        let [count, addr_hi, addr_lo, record_type, ref data @ .., checksum] = bytes[..] else {
             return Err(HexError::RecordTooShort {
                 line: line_num,
                 bytes: bytes.len(),
             });
-        }
-
-        let declared_count = bytes[0] as usize;
-        let record_type = bytes[3];
-        let Some((&checksum, body)) = bytes.split_last() else {
-            return Err(HexError::ByteCountMismatch {
-                line: line_num,
-                declared: 0,
-                actual: 0,
-            });
         };
-        let data = &body[4..];
+        let declared_count = count as usize;
 
         if data.len() != declared_count {
             return Err(HexError::ByteCountMismatch {
@@ -228,7 +218,10 @@ impl HexFile {
         }
 
         // Checksum: two's complement of the sum of all bytes excluding the checksum itself.
-        let sum: u8 = body.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
+        let sum: u8 = [count, addr_hi, addr_lo, record_type]
+            .iter()
+            .chain(data)
+            .fold(0u8, |acc, &b| acc.wrapping_add(b));
         let expected = (!sum).wrapping_add(1);
         if expected != checksum {
             return Err(HexError::BadChecksum {
@@ -260,7 +253,7 @@ impl HexFile {
         }
         // It does 32-bit loads/writes at extend<<16 | address; the type-04
         // record only supplies the upper half, so the address must be aligned.
-        let address = u16::from_be_bytes([bytes[1], bytes[2]]);
+        let address = u16::from_be_bytes([addr_hi, addr_lo]);
         if record_type == 0x00 && !address.is_multiple_of(4) {
             return Err(HexError::UnalignedDataAddress {
                 line: line_num,
