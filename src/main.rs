@@ -304,7 +304,7 @@ enum AppError {
         "Multiple matching devices found — use --port to select one:\n{}",
         .0.iter().map(|d| format!("  {} on {}", d.name, d.port)).collect::<Vec<_>>().join("\n")
     )]
-    AmbiguousDevice(Vec<FleaDevice>),
+    AmbiguousDevice(Vec<PortCandidate>),
 
     #[error("Cannot list serial ports: {0}")]
     EnumeratePorts(serialport::Error),
@@ -319,9 +319,11 @@ enum AppError {
     Aborted,
 }
 
-/// A `FleaScope` port as enumerated, with the device's USB serial number.
+/// A `FleaScope` port as enumerated, with the device's product name and USB
+/// serial number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PortCandidate {
+    name: String,
     port: String,
     serial: Option<String>,
 }
@@ -334,24 +336,36 @@ fn enumeration_error(e: FleaConnectorError) -> AppError {
     }
 }
 
-/// Enumerate `FleaScope` ports (any product name) with their USB serial numbers.
-fn enumerate_fleascopes() -> Result<Vec<PortCandidate>, AppError> {
-    let flea_ports: Vec<String> = FleaConnector::get_available_devices(None)
+/// Enumerate `FleaScope` ports matching `name` (any product name if `None`)
+/// with their USB serial numbers.
+fn enumerate_fleascopes(name: Option<&str>) -> Result<Vec<PortCandidate>, AppError> {
+    let flea_devices: Vec<_> = FleaConnector::get_available_devices(name)
         .map_err(enumeration_error)?
-        .map(|d| d.port)
         .collect();
     let ports = serialport::available_ports().map_err(AppError::EnumeratePorts)?;
-    Ok(ports
+    Ok(fleascope_candidates(&flea_devices, ports))
+}
+
+/// Keep the `ports` that `flea_devices` lists, each with the device's product
+/// name and USB serial number (`None` for non-USB ports).
+fn fleascope_candidates(
+    flea_devices: &[FleaDevice],
+    ports: Vec<serialport::SerialPortInfo>,
+) -> Vec<PortCandidate> {
+    ports
         .into_iter()
-        .filter(|p| flea_ports.contains(&p.port_name))
-        .map(|p| PortCandidate {
-            serial: match p.port_type {
-                serialport::SerialPortType::UsbPort(usb) => usb.serial_number,
-                _ => None,
-            },
-            port: p.port_name,
+        .filter_map(|p| {
+            let device = flea_devices.iter().find(|d| d.port == p.port_name)?;
+            Some(PortCandidate {
+                name: device.name.clone(),
+                serial: match p.port_type {
+                    serialport::SerialPortType::UsbPort(usb) => usb.serial_number,
+                    _ => None,
+                },
+                port: p.port_name,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Handshake attempts of `connect_port`, as in fleascope-rs; all but the last
@@ -368,13 +382,12 @@ const CONNECT_ATTEMPTS: usize = 3;
 /// first open as well as after each reset, so the device that gets flashed is
 /// the one the user confirmed even if another took its port meanwhile.
 fn connect_port(
-    name: &str,
     confirmed: &PortCandidate,
     mut enumerate: impl FnMut() -> Result<Vec<PortCandidate>, AppError>,
 ) -> Result<IdleFleaTerminal, AppError> {
     let find = |found: &[PortCandidate]| {
         reselect_port(confirmed, found).ok_or_else(|| FleaConnectorError::DeviceNotFound {
-            name: name.to_string(),
+            name: confirmed.name.clone(),
         })
     };
     let mut port = find(&enumerate()?)?;
@@ -431,10 +444,10 @@ fn reselect_port(confirmed: &PortCandidate, found: &[PortCandidate]) -> Option<S
 /// macOS lists each device twice, as `/dev/cu.*` and `/dev/tty.*`; the
 /// `tty.*` alias of a listed `cu.*` port is dropped so one device stays one.
 fn select_device(
-    mut devices: Vec<FleaDevice>,
+    mut devices: Vec<PortCandidate>,
     port: Option<&str>,
     name: Option<&str>,
-) -> Result<FleaDevice, AppError> {
+) -> Result<PortCandidate, AppError> {
     // Narrow to the requested port when --port is given.
     if let Some(port) = port {
         devices.retain(|d| d.port == port);
@@ -487,23 +500,14 @@ fn run(cli: &Cli) -> Result<(), AppError> {
     eprintln!("  OK — {} records", hex.lines.len());
 
     // ── 2. Enumerate and select device ───────────────────────────────────────
-    // Collect every device that matches the optional --name filter.
-    let devices = FleaConnector::get_available_devices(cli.name.as_deref())
-        .map_err(enumeration_error)?
-        .collect();
-    let device = &select_device(devices, cli.port.as_deref(), cli.name.as_deref())?;
-    // Record the device's USB serial number now, so connecting can check it is
-    // still this device and find it again if it re-enumerates under another port.
-    let confirmed = enumerate_fleascopes()?
-        .into_iter()
-        .find(|c| c.port == device.port)
-        .unwrap_or_else(|| PortCandidate {
-            port: device.port.clone(),
-            serial: None,
-        });
+    // Collect every device that matches the optional --name filter, with its
+    // USB serial number, so connecting can check it is still this device and
+    // find it again if it re-enumerates under another port.
+    let devices = enumerate_fleascopes(cli.name.as_deref())?;
+    let confirmed = select_device(devices, cli.port.as_deref(), cli.name.as_deref())?;
 
     // ── 3. Confirm with the user ─────────────────────────────────────────────
-    eprintln!("Target device: {} on {}", device.name, device.port);
+    eprintln!("Target device: {} on {}", confirmed.name, confirmed.port);
 
     if !cli.yes {
         eprint!("Flash this device? [y/N] ");
@@ -523,7 +527,7 @@ fn run(cli: &Cli) -> Result<(), AppError> {
     eprintln!("Connecting...");
     // Connect to the confirmed device, with the library's reset-and-retry on
     // handshake timeout (FleaConnector::connect with Some(port) panics on it).
-    let mut terminal = connect_port(&device.name, &confirmed, enumerate_fleascopes)?;
+    let mut terminal = connect_port(&confirmed, || enumerate_fleascopes(None))?;
     eprintln!("  Connected.");
 
     // ── 5. Flash ─────────────────────────────────────────────────────────────
@@ -552,6 +556,7 @@ mod tests {
 
     fn cand(port: &str, serial: Option<&str>) -> PortCandidate {
         PortCandidate {
+            name: "Flea-Scope".to_string(),
             port: port.to_string(),
             serial: serial.map(str::to_string),
         }
@@ -699,24 +704,66 @@ mod tests {
         );
     }
 
-    fn dev(port: &str) -> FleaDevice {
-        FleaDevice {
-            name: "FleaScope".to_string(),
-            port: port.to_string(),
-        }
+    #[test]
+    fn fleascope_candidates_pairs_each_listed_port_with_its_serial() {
+        use serialport::{SerialPortInfo, SerialPortType, UsbPortInfo};
+
+        let usb = |port: &str, serial: &str| SerialPortInfo {
+            port_name: port.to_string(),
+            port_type: SerialPortType::UsbPort(UsbPortInfo {
+                vid: 0x04d8,
+                pid: 0xe66e,
+                serial_number: Some(serial.to_string()),
+                manufacturer: None,
+                product: None,
+            }),
+        };
+        let devices = [
+            FleaDevice {
+                name: "Flea-Scope".to_string(),
+                port: "/dev/ttyACM1".to_string(),
+            },
+            FleaDevice {
+                name: "Other".to_string(),
+                port: "/dev/ttyS0".to_string(),
+            },
+        ];
+        let ports = vec![
+            // Not a FleaScope: dropped even though it has a serial number.
+            usb("/dev/ttyACM0", "X"),
+            usb("/dev/ttyACM1", "A"),
+            SerialPortInfo {
+                port_name: "/dev/ttyS0".to_string(),
+                port_type: SerialPortType::Unknown,
+            },
+        ];
+        let mut other = cand("/dev/ttyS0", None);
+        other.name = "Other".to_string();
+        assert_eq!(
+            fleascope_candidates(&devices, ports),
+            vec![cand("/dev/ttyACM1", Some("A")), other]
+        );
     }
 
     #[test]
     fn select_device_treats_macos_cu_and_tty_as_one_device() {
         // macOS lists one device twice: callout (cu.*) and dial-in (tty.*).
-        let aliases = || vec![dev("/dev/cu.usbmodem1"), dev("/dev/tty.usbmodem1")];
+        let aliases = || {
+            vec![
+                cand("/dev/cu.usbmodem1", None),
+                cand("/dev/tty.usbmodem1", None),
+            ]
+        };
         let picked = select_device(aliases(), None, None).map(|d| d.port);
         assert_eq!(picked.ok().as_deref(), Some("/dev/cu.usbmodem1"));
         // An explicit --port still selects either alias.
         let picked = select_device(aliases(), Some("/dev/tty.usbmodem1"), None).map(|d| d.port);
         assert_eq!(picked.ok().as_deref(), Some("/dev/tty.usbmodem1"));
         // Two distinct devices stay ambiguous.
-        let two = vec![dev("/dev/cu.usbmodem1"), dev("/dev/cu.usbmodem2")];
+        let two = vec![
+            cand("/dev/cu.usbmodem1", None),
+            cand("/dev/cu.usbmodem2", None),
+        ];
         assert!(matches!(
             select_device(two, None, None),
             Err(AppError::AmbiguousDevice(_))
@@ -793,7 +840,7 @@ mod tests {
         let confirmed = cand(&old_path, Some("A"));
         // Before the reset the confirmed device is on its old port.
         let mut found = vec![cand(&other_path, Some("B")), cand(&old_path, Some("A"))];
-        let result = connect_port("Flea-Scope", &confirmed, || {
+        let result = connect_port(&confirmed, || {
             let current = found.clone();
             found = vec![cand(&other_path, Some("B")), cand(&new_path, Some("A"))];
             Ok(current)
@@ -829,7 +876,7 @@ mod tests {
 
         let confirmed = cand(&path, Some("A"));
         let found = vec![cand(&path, Some("B"))];
-        let result = connect_port("Flea-Scope", &confirmed, || Ok(found.clone()));
+        let result = connect_port(&confirmed, || Ok(found.clone()));
 
         stop.store(true, Ordering::SeqCst);
         let other = other.join().unwrap();
@@ -860,7 +907,7 @@ mod tests {
         thread::spawn(move || {
             let confirmed = cand(&path, Some("A"));
             let mut lookups = 0;
-            let result = connect_port("Flea-Scope", &confirmed, || {
+            let result = connect_port(&confirmed, || {
                 lookups += 1;
                 Ok(vec![cand(&path, Some("A"))])
             });
