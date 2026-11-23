@@ -206,8 +206,14 @@ impl HexFile {
 
         let declared_count = bytes[0] as usize;
         let record_type = bytes[3];
-        let data = &bytes[4..bytes.len() - 1];
-        let checksum = *bytes.last().expect("checked length above");
+        let Some((&checksum, body)) = bytes.split_last() else {
+            return Err(HexError::ByteCountMismatch {
+                line: line_num,
+                declared: 0,
+                actual: 0,
+            });
+        };
+        let data = &body[4..];
 
         if data.len() != declared_count {
             return Err(HexError::ByteCountMismatch {
@@ -218,9 +224,7 @@ impl HexFile {
         }
 
         // Checksum: two's complement of the sum of all bytes excluding the checksum itself.
-        let sum: u8 = bytes[..bytes.len() - 1]
-            .iter()
-            .fold(0u8, |acc, &b| acc.wrapping_add(b));
+        let sum: u8 = body.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
         let expected = (!sum).wrapping_add(1);
         if expected != checksum {
             return Err(HexError::BadChecksum {
@@ -520,6 +524,7 @@ fn run(cli: &Cli) -> Result<(), AppError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
