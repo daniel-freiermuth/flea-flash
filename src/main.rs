@@ -566,10 +566,11 @@ mod tests {
 
     #[test]
     fn parse_reports_truncated_record_as_too_short() {
-        let Err(err) = HexFile::parse(":020000040000FA\n:04000000\n:00000001FF\n") else {
-            panic!("truncated record must be rejected");
-        };
-        assert_eq!(err.to_string(), "Line 2: record too short (4 bytes, minimum 5)");
+        let err = HexFile::parse(":020000040000FA\n:04000000\n:00000001FF\n").err();
+        assert_eq!(
+            err.map(|e| e.to_string()).as_deref(),
+            Some("Line 2: record too short (4 bytes, minimum 5)")
+        );
     }
 
     #[test]
