@@ -1,7 +1,0 @@
-[env]
-# libudev.so.1 is installed but libudev-dev (which ships libudev.pc) is not.
-# The .libudev-stub directory contains a minimal .pc file and a symlink to the
-# installed shared library so pkg-config can find it without a system install.
-# If you install libudev-dev (sudo apt-get install libudev-dev) you can remove
-# this entry.
-PKG_CONFIG_PATH = { value = ".libudev-stub", relative = true }
