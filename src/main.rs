@@ -364,9 +364,12 @@ fn connect_port(
             Ok(terminal) => return Ok(terminal),
             Err((mut serial, FleaTerminalError::Timeout { .. })) if attempt < CONNECT_ATTEMPTS => {
                 log::debug!("Timeout during initialization, sending reset and retrying");
-                let _ = serial.send_reset(); // best effort, as in fleascope-rs
-                                             // Release the port so the re-enumerated device is not kept
-                                             // off its old device node.
+                // Best effort, as in fleascope-rs: still retry, but surface why.
+                if let Err(e) = serial.send_reset() {
+                    log::warn!("sending reset to {port} failed: {e}");
+                }
+                // Release the port so the re-enumerated device is not kept
+                // off its old device node.
                 drop(serial);
                 thread::sleep(Duration::from_secs(2));
                 port = find(&enumerate()?)?;
