@@ -306,8 +306,11 @@ enum AppError {
     )]
     AmbiguousDevice(Vec<FleaDevice>),
 
-    #[error("I/O error reading confirmation: {0}")]
-    ConfirmIo(#[from] std::io::Error),
+    #[error("Cannot write confirmation prompt: {0}")]
+    PromptIo(std::io::Error),
+
+    #[error("Cannot read confirmation from stdin: {0}")]
+    ConfirmIo(std::io::Error),
 
     #[error("Aborted by user.")]
     Aborted,
@@ -491,10 +494,12 @@ fn run(cli: &Cli) -> Result<(), AppError> {
 
     if !cli.yes {
         eprint!("Flash this device? [y/N] ");
-        std::io::stderr().flush()?;
+        std::io::stderr().flush().map_err(AppError::PromptIo)?;
 
         let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(AppError::ConfirmIo)?;
         match answer.trim().to_lowercase().as_str() {
             "y" | "yes" => {}
             _ => return Err(AppError::Aborted),
