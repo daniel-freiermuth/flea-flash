@@ -306,6 +306,9 @@ enum AppError {
     )]
     AmbiguousDevice(Vec<FleaDevice>),
 
+    #[error("Cannot list serial ports: {0}")]
+    EnumeratePorts(serialport::Error),
+
     #[error("Cannot write confirmation prompt: {0}")]
     PromptIo(std::io::Error),
 
@@ -323,12 +326,21 @@ struct PortCandidate {
     serial: Option<String>,
 }
 
+/// Label a failure to list serial ports as such, not as a connection error.
+fn enumeration_error(e: FleaConnectorError) -> AppError {
+    match e {
+        FleaConnectorError::SerialPort(e) => AppError::EnumeratePorts(e),
+        other => other.into(),
+    }
+}
+
 /// Enumerate `FleaScope` ports (any product name) with their USB serial numbers.
 fn enumerate_fleascopes() -> Result<Vec<PortCandidate>, AppError> {
-    let flea_ports: Vec<String> = FleaConnector::get_available_devices(None)?
+    let flea_ports: Vec<String> = FleaConnector::get_available_devices(None)
+        .map_err(enumeration_error)?
         .map(|d| d.port)
         .collect();
-    let ports = serialport::available_ports().map_err(FleaConnectorError::from)?;
+    let ports = serialport::available_ports().map_err(AppError::EnumeratePorts)?;
     Ok(ports
         .into_iter()
         .filter(|p| flea_ports.contains(&p.port_name))
@@ -476,8 +488,9 @@ fn run(cli: &Cli) -> Result<(), AppError> {
 
     // ── 2. Enumerate and select device ───────────────────────────────────────
     // Collect every device that matches the optional --name filter.
-    let devices: Vec<FleaDevice> =
-        FleaConnector::get_available_devices(cli.name.as_deref())?.collect();
+    let devices = FleaConnector::get_available_devices(cli.name.as_deref())
+        .map_err(enumeration_error)?
+        .collect();
     let device = &select_device(devices, cli.port.as_deref(), cli.name.as_deref())?;
     // Record the device's USB serial number now, so connecting can check it is
     // still this device and find it again if it re-enumerates under another port.
@@ -708,6 +721,20 @@ mod tests {
             select_device(two, None, None),
             Err(AppError::AmbiguousDevice(_))
         ));
+    }
+
+    #[test]
+    fn enumeration_error_labels_port_listing_failures_as_enumeration() {
+        let listing = FleaConnectorError::SerialPort(serialport::Error::new(
+            serialport::ErrorKind::Unknown,
+            "udev failed",
+        ));
+        let err = enumeration_error(listing);
+        assert!(matches!(err, AppError::EnumeratePorts(_)));
+        assert_eq!(err.to_string(), "Cannot list serial ports: udev failed");
+        // Other connector errors keep their connection context.
+        let other = FleaConnectorError::DeviceNotFound { name: "x".into() };
+        assert!(matches!(enumeration_error(other), AppError::Connect(_)));
     }
 
     /// Fake device on a pty master: records what it receives and, if
