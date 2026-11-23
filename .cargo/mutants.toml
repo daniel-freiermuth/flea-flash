@@ -1,0 +1,18 @@
+# cargo-mutants configuration, shared by local runs and the PR gate in
+# .github/workflows/mutants.yml. See https://mutants.rs/.
+
+exclude_re = [
+    # Whole-function replacements of the entry points that need a real
+    # FleaScope, real serial-port enumeration or stdin. `--in-diff` selects
+    # these for any change anywhere in the function body, and no hermetic test
+    # can run the function, so they would fail every PR that touches it.
+    # Mutants of individual lines inside these functions stay gated: they
+    # include pure, safety-relevant decisions (in `run`: which USB serial is
+    # recorded for the confirmed device, and whether the [y/N] prompt is
+    # skipped). A PR changing such a line fails until that decision is moved
+    # into a helper with tests, like select_device or reselect_port.
+    'replace (main|run|enumerate_fleascopes)\b',
+    # Equivalent mutant: in `hi << 4 | lo` the low nibble of `hi << 4` is zero
+    # and `lo` < 16, so `|` and `^` give the same byte; no test can catch it.
+    'replace \| with \^ in HexFile::validate_record$',
+]
