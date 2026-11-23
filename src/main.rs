@@ -327,11 +327,16 @@ fn enumerate_fleascopes() -> Result<Vec<PortCandidate>, AppError> {
         .collect())
 }
 
+/// Handshake attempts of `connect_port`, as in fleascope-rs; all but the last
+/// one end in a `reset` when the device does not answer in time.
+const CONNECT_ATTEMPTS: usize = 3;
+
 /// Open the `confirmed` port and bring it to an idle terminal.
 ///
 /// Mirrors `FleaConnector`'s name-based connect: on a handshake timeout it
 /// sends `reset`, closes the port, waits, and enumerates again (`enumerate`),
-/// because the rebooted device can come back under a different port. The
+/// because the rebooted device can come back under a different port. After
+/// `CONNECT_ATTEMPTS` timed-out handshakes the timeout is returned. The
 /// device is found by USB serial number, never by product name, before the
 /// first open as well as after each reset, so the device that gets flashed is
 /// the one the user confirmed even if another took its port meanwhile.
@@ -346,13 +351,14 @@ fn connect_port(
         })
     };
     let mut port = find(&enumerate()?)?;
+    let mut attempt = 1;
     loop {
         match StatelessFleaTerminal::new(&port)
             .map_err(FleaConnectorError::from)?
             .try_into()
         {
             Ok(terminal) => return Ok(terminal),
-            Err((mut serial, FleaTerminalError::Timeout { .. })) => {
+            Err((mut serial, FleaTerminalError::Timeout { .. })) if attempt < CONNECT_ATTEMPTS => {
                 log::debug!("Timeout during initialization, sending reset and retrying");
                 let _ = serial.send_reset(); // best effort, as in fleascope-rs
                 // Release the port so the re-enumerated device is not kept
@@ -360,6 +366,7 @@ fn connect_port(
                 drop(serial);
                 thread::sleep(Duration::from_secs(2));
                 port = find(&enumerate()?)?;
+                attempt += 1;
             }
             Err((_serial, e)) => return Err(FleaConnectorError::from(e).into()),
         }
@@ -717,6 +724,47 @@ mod tests {
         let other = other.join().unwrap();
         assert!(result.is_err(), "connected to a device the user did not confirm");
         assert!(other.is_empty(), "other device was contacted: {other:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connect_port_gives_up_when_confirmed_device_never_answers() {
+        use std::sync::{atomic::AtomicBool, atomic::Ordering, mpsc, Arc};
+
+        // The confirmed device stays enumerated but never answers the
+        // handshake, not even after a reset.
+        let (master, slave) = serialport::TTYPort::pair().unwrap();
+        let path = serialport::SerialPort::name(&slave).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let device = fake_device(master, false, Arc::clone(&stop));
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let confirmed = cand(&path, Some("A"));
+            let mut lookups = 0;
+            let result = connect_port("Flea-Scope", &confirmed, || {
+                lookups += 1;
+                Ok(vec![cand(&path, Some("A"))])
+            });
+            let _ = tx.send((result.err(), lookups));
+        });
+        // Each attempt takes about 1s ("prompt on" timeout), each reset 2s.
+        let outcome = rx.recv_timeout(Duration::from_secs(30));
+
+        stop.store(true, Ordering::SeqCst);
+        let device = device.join().unwrap();
+        let (err, lookups) = outcome.expect("connect_port did not give up");
+        assert!(
+            matches!(
+                err,
+                Some(AppError::Connect(FleaConnectorError::SerialTerminal(
+                    FleaTerminalError::Timeout { .. }
+                )))
+            ),
+            "expected a handshake timeout, got {err:?}"
+        );
+        assert_eq!(lookups, CONNECT_ATTEMPTS);
+        assert!(device.contains("reset\n"), "device saw {device:?}");
     }
 
     #[test]
