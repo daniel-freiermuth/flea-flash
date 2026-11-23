@@ -1,0 +1,46 @@
+name: Mutants
+
+# Mutation-test the code a PR touches: every mutant of a changed line must be
+# caught by `cargo test`. Configuration (exclusions) lives in
+# .cargo/mutants.toml so local runs match. Reproduce locally with:
+#   git diff origin/master...HEAD > pr.diff && cargo mutants --in-diff pr.diff
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The base branch is needed for the merge-base diff below.
+          fetch-depth: 0
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      # Fails the job if cargo-mutants cannot parse the tree or its config.
+      - run: cargo mutants --list --cargo-arg=--locked
+      - run: git diff "origin/$BASE_REF...HEAD" > pr.diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
+      # Exit codes: 0 all caught/unviable (or no Rust lines changed), 2 missed
+      # mutants, 3 timeouts, 4 baseline tests failed; anything but 0 fails the
+      # job. Each mutant costs one `cargo test` (~4 s, one test sleeps 2 s), so
+      # even a diff touching all 75 mutants fits well inside the cap; hitting
+      # the cap fails the job too.
+      - run: cargo mutants --in-diff pr.diff --cargo-arg=--locked
+        timeout-minutes: 30
