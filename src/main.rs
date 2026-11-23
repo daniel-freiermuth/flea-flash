@@ -58,6 +58,9 @@ enum HexError {
     #[error("Line {line}: invalid hex digit")]
     InvalidHex { line: usize },
 
+    #[error("Line {line}: record too short ({len} bytes, minimum 5)")]
+    RecordTooShort { line: usize, len: usize },
+
     #[error("Line {line}: byte count ({declared}) does not match actual data length ({actual})")]
     ByteCountMismatch {
         line: usize,
@@ -197,10 +200,9 @@ impl HexFile {
 
         // Minimum: 1 (count) + 2 (addr) + 1 (type) + 1 (checksum) = 5 bytes
         if bytes.len() < 5 {
-            return Err(HexError::ByteCountMismatch {
+            return Err(HexError::RecordTooShort {
                 line: line_num,
-                declared: 0,
-                actual: 0,
+                len: bytes.len(),
             });
         }
 
@@ -560,6 +562,14 @@ mod tests {
             })
         ));
         assert!(HexFile::parse(":020000040000FA\n:0400000001020304F2\n:00000001FF\n").is_ok());
+    }
+
+    #[test]
+    fn parse_reports_truncated_record_as_too_short() {
+        let Err(err) = HexFile::parse(":020000040000FA\n:04000000\n:00000001FF\n") else {
+            panic!("truncated record must be rejected");
+        };
+        assert_eq!(err.to_string(), "Line 2: record too short (4 bytes, minimum 5)");
     }
 
     #[test]
