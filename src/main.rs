@@ -217,6 +217,19 @@ impl HexFile {
             });
         }
 
+        // Checksum: two's complement of the sum of all bytes excluding the checksum itself.
+        let sum: u8 = bytes[..bytes.len() - 1]
+            .iter()
+            .fold(0u8, |acc, &b| acc.wrapping_add(b));
+        let expected = (!sum).wrapping_add(1);
+        if expected != checksum {
+            return Err(HexError::BadChecksum {
+                line: line_num,
+                expected,
+                actual: checksum,
+            });
+        }
+
         // Firmware (flash.c) accepts only data (00), EOF (01, 0 bytes) and
         // extended linear address (04, 2 bytes); anything else is "bad record".
         match (record_type, declared_count) {
@@ -244,19 +257,6 @@ impl HexFile {
             return Err(HexError::UnalignedDataAddress {
                 line: line_num,
                 address,
-            });
-        }
-
-        // Checksum: two's complement of the sum of all bytes excluding the checksum itself.
-        let sum: u8 = bytes[..bytes.len() - 1]
-            .iter()
-            .fold(0u8, |acc, &b| acc.wrapping_add(b));
-        let expected = (!sum).wrapping_add(1);
-        if expected != checksum {
-            return Err(HexError::BadChecksum {
-                line: line_num,
-                expected,
-                actual: checksum,
             });
         }
 
@@ -570,6 +570,20 @@ mod tests {
             })
         ));
         assert!(HexFile::parse(":020000040000FA\n:0400040001020304EE\n:00000001FF\n").is_ok());
+    }
+
+    #[test]
+    fn parse_reports_corrupted_type_or_address_as_checksum_mismatch() {
+        // Valid data record ":0400000001020304F2" with the type byte flipped to 05.
+        assert!(matches!(
+            HexFile::parse(":020000040000FA\n:0400000501020304F2\n:00000001FF\n"),
+            Err(HexError::BadChecksum { line: 2, .. })
+        ));
+        // Same record with the address flipped to 0x0002.
+        assert!(matches!(
+            HexFile::parse(":020000040000FA\n:0400020001020304F2\n:00000001FF\n"),
+            Err(HexError::BadChecksum { line: 2, .. })
+        ));
     }
 
     #[test]
