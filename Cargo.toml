@@ -10,7 +10,11 @@ name = "flea-flash"
 path = "src/main.rs"
 
 [dependencies]
-fleascope-rs = { path = "../fleascope-rs" }
+# 1.0.0 is the first release with flash_upgrade/FlashProgress/FlashUpgradeError.
+# To build against a local checkout, pass
+# --config 'patch.crates-io.fleascope-rs.path="../fleascope-rs"'
+# (and don't commit the Cargo.lock that produces: CI builds with --locked).
+fleascope-rs = "1.0"
 serialport = "4.8.1"
 clap = { version = "4.5", features = ["derive"] }
 thiserror = "2.0"
