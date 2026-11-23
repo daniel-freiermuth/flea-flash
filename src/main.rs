@@ -58,6 +58,11 @@ enum HexError {
     #[error("Line {line}: invalid hex digit")]
     InvalidHex { line: usize },
 
+    #[error(
+        "Line {line}: record has {bytes} bytes; minimum is 5 (count, address, type, checksum)"
+    )]
+    RecordTooShort { line: usize, bytes: usize },
+
     #[error("Line {line}: byte count ({declared}) does not match actual data length ({actual})")]
     ByteCountMismatch {
         line: usize,
@@ -197,10 +202,9 @@ impl HexFile {
 
         // Minimum: 1 (count) + 2 (addr) + 1 (type) + 1 (checksum) = 5 bytes
         if bytes.len() < 5 {
-            return Err(HexError::ByteCountMismatch {
+            return Err(HexError::RecordTooShort {
                 line: line_num,
-                declared: 0,
-                actual: 0,
+                bytes: bytes.len(),
             });
         }
 
@@ -591,6 +595,14 @@ mod tests {
         assert!(matches!(
             HexFile::parse(":020000040000FA\n:0400020001020304F2\n:00000001FF\n"),
             Err(HexError::BadChecksum { line: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_record_shorter_than_minimum() {
+        assert!(matches!(
+            HexFile::parse(":0000\n"),
+            Err(HexError::RecordTooShort { line: 1, bytes: 2 })
         ));
     }
 
