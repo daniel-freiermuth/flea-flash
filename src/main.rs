@@ -700,6 +700,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "macOS ptys reject the IOSSIOSPEED ioctl serialport uses to set the baud rate on open"
+    )]
     fn connect_port_resets_and_follows_confirmed_device_to_new_port() {
         use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 
@@ -772,6 +776,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "macOS ptys reject the IOSSIOSPEED ioctl serialport uses to set the baud rate on open"
+    )]
     fn connect_port_gives_up_when_confirmed_device_never_answers() {
         use std::sync::{atomic::AtomicBool, atomic::Ordering, mpsc, Arc};
 
