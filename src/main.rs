@@ -1,7 +1,7 @@
 use clap::Parser;
 use fleascope_rs::{
-    FleaConnector, FleaConnectorError, FleaDevice, FleaTerminalError, FlashProgress,
-    FlashUpgradeError, IdleFleaTerminal, StatelessFleaTerminal,
+    FlashProgress, FlashUpgradeError, FleaConnector, FleaConnectorError, FleaDevice,
+    FleaTerminalError, IdleFleaTerminal, StatelessFleaTerminal,
 };
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -72,7 +72,9 @@ enum HexError {
         actual: u8,
     },
 
-    #[error("Line {line}: data record byte count {count} is not a multiple of 4 (firmware requirement)")]
+    #[error(
+        "Line {line}: data record byte count {count} is not a multiple of 4 (firmware requirement)"
+    )]
     UnalignedDataCount { line: usize, count: usize },
 
     #[error("Line {line}: data record address 0x{address:04x} is not 4-byte aligned (firmware requirement)")]
@@ -101,7 +103,9 @@ enum HexError {
     #[error("No EOF record (type 1) found")]
     MissingEof,
 
-    #[error("Line {line}: record after EOF record (type 1); the device stops reading at the first EOF")]
+    #[error(
+        "Line {line}: record after EOF record (type 1); the device stops reading at the first EOF"
+    )]
     DataAfterEof { line: usize },
 }
 
@@ -361,8 +365,8 @@ fn connect_port(
             Err((mut serial, FleaTerminalError::Timeout { .. })) if attempt < CONNECT_ATTEMPTS => {
                 log::debug!("Timeout during initialization, sending reset and retrying");
                 let _ = serial.send_reset(); // best effort, as in fleascope-rs
-                // Release the port so the re-enumerated device is not kept
-                // off its old device node.
+                                             // Release the port so the re-enumerated device is not kept
+                                             // off its old device node.
                 drop(serial);
                 thread::sleep(Duration::from_secs(2));
                 port = find(&enumerate()?)?;
@@ -528,17 +532,29 @@ mod tests {
         // Type-05 start linear address (emitted by GNU objcopy): firmware says "bad record".
         assert!(matches!(
             HexFile::parse(":020000040000FA\n:04000005BFC0000078\n:00000001FF\n"),
-            Err(HexError::UnsupportedRecord { line: 2, record_type: 0x05, count: 4 })
+            Err(HexError::UnsupportedRecord {
+                line: 2,
+                record_type: 0x05,
+                count: 4
+            })
         ));
         // Type-04 must carry exactly 2 bytes.
         assert!(matches!(
             HexFile::parse(":0400000400000000F8\n:00000001FF\n"),
-            Err(HexError::UnsupportedRecord { line: 1, record_type: 0x04, count: 4 })
+            Err(HexError::UnsupportedRecord {
+                line: 1,
+                record_type: 0x04,
+                count: 4
+            })
         ));
         // Type-01 must carry no data.
         assert!(matches!(
             HexFile::parse(":020000040000FA\n:0100000100FE\n"),
-            Err(HexError::UnsupportedRecord { line: 2, record_type: 0x01, count: 1 })
+            Err(HexError::UnsupportedRecord {
+                line: 2,
+                record_type: 0x01,
+                count: 1
+            })
         ));
         assert!(HexFile::parse(":020000040000FA\n:0400000001020304F2\n:00000001FF\n").is_ok());
     }
@@ -548,7 +564,10 @@ mod tests {
         // Firmware does 32-bit loads/writes at extend<<16 | addr; addr 0x0002 is unaligned.
         assert!(matches!(
             HexFile::parse(":020000040000FA\n:0400020001020304F0\n:00000001FF\n"),
-            Err(HexError::UnalignedDataAddress { line: 2, address: 0x0002 })
+            Err(HexError::UnalignedDataAddress {
+                line: 2,
+                address: 0x0002
+            })
         ));
         assert!(HexFile::parse(":020000040000FA\n:0400040001020304EE\n:00000001FF\n").is_ok());
     }
@@ -582,8 +601,14 @@ mod tests {
     #[test]
     fn reselect_port_follows_serial_to_new_port() {
         let confirmed = cand("/dev/ttyACM0", Some("A"));
-        let found = [cand("/dev/ttyACM1", Some("B")), cand("/dev/ttyACM2", Some("A"))];
-        assert_eq!(reselect_port(&confirmed, &found).as_deref(), Some("/dev/ttyACM2"));
+        let found = [
+            cand("/dev/ttyACM1", Some("B")),
+            cand("/dev/ttyACM2", Some("A")),
+        ];
+        assert_eq!(
+            reselect_port(&confirmed, &found).as_deref(),
+            Some("/dev/ttyACM2")
+        );
     }
 
     #[test]
@@ -603,13 +628,19 @@ mod tests {
             cand("/dev/cu.usbmodem1", Some("A")),
             cand("/dev/tty.usbmodem1", Some("A")),
         ];
-        assert_eq!(reselect_port(&confirmed, &found).as_deref(), Some("/dev/tty.usbmodem1"));
+        assert_eq!(
+            reselect_port(&confirmed, &found).as_deref(),
+            Some("/dev/tty.usbmodem1")
+        );
     }
 
     #[test]
     fn reselect_port_without_serial_accepts_only_confirmed_port() {
         let confirmed = cand("/dev/ttyACM0", None);
-        assert_eq!(reselect_port(&confirmed, &[cand("/dev/ttyACM1", None)]), None);
+        assert_eq!(
+            reselect_port(&confirmed, &[cand("/dev/ttyACM1", None)]),
+            None
+        );
         assert_eq!(
             reselect_port(&confirmed, &[cand("/dev/ttyACM0", None)]).as_deref(),
             Some("/dev/ttyACM0")
@@ -634,7 +665,10 @@ mod tests {
         assert_eq!(picked.ok().as_deref(), Some("/dev/tty.usbmodem1"));
         // Two distinct devices stay ambiguous.
         let two = vec![dev("/dev/cu.usbmodem1"), dev("/dev/cu.usbmodem2")];
-        assert!(matches!(select_device(two, None, None), Err(AppError::AmbiguousDevice(_))));
+        assert!(matches!(
+            select_device(two, None, None),
+            Err(AppError::AmbiguousDevice(_))
+        ));
     }
 
     /// Fake device on a pty master: records what it receives and, if
@@ -696,9 +730,16 @@ mod tests {
         });
 
         stop.store(true, Ordering::SeqCst);
-        let (old, new, other) = (old.join().unwrap(), new.join().unwrap(), other.join().unwrap());
+        let (old, new, other) = (
+            old.join().unwrap(),
+            new.join().unwrap(),
+            other.join().unwrap(),
+        );
         assert!(result.is_ok(), "connect failed: {:?}", result.err());
-        assert!(old.contains("prompt on\n") && old.contains("reset\n"), "old port saw {old:?}");
+        assert!(
+            old.contains("prompt on\n") && old.contains("reset\n"),
+            "old port saw {old:?}"
+        );
         assert!(new.ends_with("prompt on\n"), "new port saw {new:?}");
         assert!(other.is_empty(), "other device was contacted: {other:?}");
     }
@@ -722,7 +763,10 @@ mod tests {
 
         stop.store(true, Ordering::SeqCst);
         let other = other.join().unwrap();
-        assert!(result.is_err(), "connected to a device the user did not confirm");
+        assert!(
+            result.is_err(),
+            "connected to a device the user did not confirm"
+        );
         assert!(other.is_empty(), "other device was contacted: {other:?}");
     }
 
