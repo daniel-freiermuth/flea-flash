@@ -643,6 +643,41 @@ mod tests {
             ),
             Err(HexError::LineTooLong { line: 2, len: 75 })
         ));
+        // Exactly 71 characters (30 data bytes) passes the length check; it is then
+        // rejected only because 30 is not a multiple of the 4-byte flash word.
+        assert!(matches!(
+            HexFile::parse(
+                ":020000040000FA\n:1E000000000000000000000000000000000000000000000000000000000000000000E2\n:00000001FF\n"
+            ),
+            Err(HexError::UnalignedDataCount { line: 2, count: 30 })
+        ));
+        // 72 characters: one past the firmware's line buffer.
+        assert!(matches!(
+            HexFile::parse(
+                ":020000040000FA\n:1E000000000000000000000000000000000000000000000000000000000000000000E20\n:00000001FF\n"
+            ),
+            Err(HexError::LineTooLong { line: 2, len: 72 })
+        ));
+    }
+
+    #[test]
+    fn parse_accepts_lowercase_hex_digits() {
+        // Intel HEX allows lowercase digits; some toolchains emit them.
+        let hex = HexFile::parse(":020000040000fa\n:04000000abcdef0194\n:00000001ff\n").unwrap();
+        assert_eq!(
+            hex.lines,
+            [":020000040000fa", ":04000000abcdef0194", ":00000001ff"]
+        );
+        // Every lowercase digit must decode to its value, so the checksum
+        // computed from them is exact.
+        assert!(matches!(
+            HexFile::parse(":020000040000fa\n:04000000abcdef01ff\n:00000001ff\n"),
+            Err(HexError::BadChecksum {
+                line: 2,
+                expected: 0x94,
+                actual: 0xff
+            })
+        ));
     }
 
     #[test]
